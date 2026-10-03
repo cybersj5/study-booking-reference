@@ -1,0 +1,87 @@
+# Релиз создаётся по тегу, совпадающему с версией в package.json.
+# Публикация начинается только после всех проверок проекта.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Проверить релиз
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Поставить Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Сверить тег с версией проекта
+        run: |
+          expected="v$(node -p 'require("./package.json").version')"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Тег $GITHUB_REF_NAME не совпадает с версией проекта $expected"
+            exit 1
+          fi
+
+      - name: Установить зависимости
+        run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: Проверить контракт
+        run: |
+          npm run contract:build
+          git diff --exit-code -- contract/openapi.yaml
+
+      - name: Проверить типы
+        run: npm run typecheck
+
+      - name: Запустить модульные и интеграционные тесты
+        run: npm test
+
+      - name: Собрать сервис и интерфейс
+        run: npm run build
+
+      - name: Поставить Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: e2e
+
+      - name: Запустить сквозные тесты
+        run: npm run e2e
+
+      - name: Собрать образ Docker
+        run: docker build --tag booking-reference:release .
+
+      - name: Сохранить отчёт Playwright при ошибке
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-release-report
+          path: e2e/test-results
+          retention-days: 7
+
+  publish:
+    name: Опубликовать релиз
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Создать GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
